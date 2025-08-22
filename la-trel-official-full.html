@@ -1,0 +1,541 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>La Trel — Official Rules (Basic/Advanced) + AI + Tests</title>
+<style>
+  :root{--light:#f0d9b5;--dark:#b58863;--p1:#2b6bf0;--p2:#e05b3c}
+  body{font-family:Inter, system-ui, Arial;display:flex;gap:16px;padding:18px;background:#0b0f14;color:#eee}
+  .board{display:grid;grid-template-columns:repeat(8,60px);grid-template-rows:repeat(8,60px);border:4px solid #222;box-shadow:0 10px 24px rgba(0,0,0,.45)}
+  .square{width:60px;height:60px;display:flex;align-items:center;justify-content:center;user-select:none;cursor:pointer}
+  .square.light{background:var(--light);color:#111}
+  .square.dark{background:var(--dark);color:#111}
+  .piece{width:44px;height:44px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-weight:700}
+  .p1{background:linear-gradient(180deg,var(--p1),#123ea5);box-shadow:inset 0 -6px 0 rgba(0,0,0,.25)}
+  .p2{background:linear-gradient(180deg,var(--p2),#a13723);box-shadow:inset 0 -6px 0 rgba(0,0,0,.25)}
+  .selected{outline:3px solid gold}
+  .hint{outline:4px solid rgba(255,255,0,.7)}
+  .capture{outline:4px solid rgba(255,0,0,.7)}
+  .controls{display:flex;flex-direction:column;gap:8px;min-width:360px}
+  .panel{background:#071018;padding:12px;border-radius:8px;border:1px solid #111}
+  button, select{padding:8px 12px;border-radius:6px;border:1px solid #243046;background:#0e1624;color:#e5e7eb}
+  button{background:#2b6bf0;border:none;color:#fff;cursor:pointer}
+  .small{font-size:13px;color:#cbd5e1}
+  .muted{opacity:.85}
+  footer{margin-top:10px;font-size:12px;color:#aaa}
+</style>
+</head>
+<body>
+  <div>
+    <div id="board" class="board" aria-label="La Trel board"></div>
+  </div>
+
+  <div class="controls">
+    <div class="panel">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+        <h3 style="margin:0">La Trel — Official Rules</h3>
+        <div class="small">You = <strong>Blue (P1)</strong> • Computer = <strong>Red (P2)</strong></div>
+      </div>
+      <p class="small muted">Modes follow the patent rules. <strong>Basic</strong>: no blockers, multi-capture jumps allowed. <strong>Advanced</strong>: one capture per move, blockers auto-placed at <code>d2</code> (Blue) and <code>e7</code> (Red); blockers cannot capture and cannot be captured.</p>
+
+      <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+        <button id="restart">Restart</button>
+        <label class="small" for="modeSelect" style="display:flex;align-items:center;gap:6px">
+          Mode:
+          <select id="modeSelect" title="Game mode">
+            <option value="basic" selected>Basic</option>
+            <option value="advanced">Advanced</option>
+          </select>
+        </label>
+        <label class="small" for="aiSelect" style="display:flex;align-items:center;gap:6px">
+          AI:
+          <select id="aiSelect" title="AI difficulty">
+            <option value="2p" selected>2 Player</option>
+            <option value="easy">Easy</option>
+            <option value="medium">Medium</option>
+            <option value="hard">Hard</option>
+          </select>
+        </label>
+      </div>
+
+      <div style="margin-top:10px">
+        <strong>Turn:</strong> <span id="turnText">Player 1</span>
+      </div>
+      <div style="margin-top:6px">
+        <strong>Selected:</strong> <span id="selectedText">—</span>
+      </div>
+      <div style="margin-top:8px">
+        <strong>Messages:</strong>
+        <div id="message" class="small muted">Ready. You are Player 1.</div>
+      </div>
+      <footer>Includes self-tests (open console). Win when opponent has no S/T/W left.</footer>
+    </div>
+  </div>
+
+<script>
+// ===== State & helpers =====
+const boardEl = document.getElementById('board');
+const turnText = document.getElementById('turnText');
+const selectedText = document.getElementById('selectedText');
+const messageEl = document.getElementById('message');
+const aiSelect = document.getElementById('aiSelect');
+const modeSelect = document.getElementById('modeSelect');
+
+let board = []; // 8x8
+let selected = null; // {r,c}
+let currentPlayer = 1; // 1 human/blue, 2 red/AI
+let mode = 'basic'; // 'basic' or 'advanced'
+
+const ORTH = [[-1,0],[1,0],[0,-1],[0,1]];
+const DIAG = [[-1,-1],[-1,1],[1,-1],[1,1]];
+
+function inBounds(r,c){ return r>=0 && r<8 && c>=0 && c<8; }
+function makePiece(type,player,blocker=false){ return {type,player,blocker}; }
+function cloneBoard(b){ return b.map(row=>row.map(cell=>cell?({...cell}):null)); }
+function setMessage(t){ messageEl.textContent = t; }
+function coordToStr(pos){ return pos ? (String.fromCharCode(97+pos.c)+(8-pos.r)) : '—'; }
+
+// ===== Setup in official formation =====
+function setupBoard(){
+  board = Array.from({length:8},()=>Array(8).fill(null));
+  // Patent back rank: S T S W W S T S
+  const back = ['S','T','S','W','W','S','T','S'];
+  // Red (Player 2) at top
+  for(let c=0;c<8;c++) board[0][c] = makePiece(back[c], 2);
+  for(let c=0;c<8;c++) board[1][c] = makePiece('D', 2);
+  // Blue (Player 1) at bottom
+  for(let c=0;c<8;c++) board[6][c] = makePiece('D', 1);
+  for(let c=0;c<8;c++) board[7][c] = makePiece(back[c], 1);
+
+  if(mode === 'advanced'){
+    // Place 1 blocker per side in fixed symmetric squares: d2 (P1), e7 (P2)
+    // Algebraic d2 => r=6,c=3 ; e7 => r=1,c=4
+    board[6][3] = makePiece('B', 1, true); // replace P1 defender at d2
+    board[1][4] = makePiece('B', 2, true); // replace P2 defender at e7
+  }
+}
+
+function renderBoard(){
+  boardEl.innerHTML = '';
+  for(let r=0;r<8;r++){
+    for(let c=0;c<8;c++){
+      const sq = document.createElement('div');
+      sq.className = 'square ' + (((r+c)%2===0)?'light':'dark');
+      sq.dataset.r = r; sq.dataset.c = c;
+      const piece = board[r][c];
+      if(piece){
+        const el = document.createElement('div');
+        el.className = 'piece ' + (piece.player===1 ? 'p1' : 'p2');
+        el.textContent = piece.type;
+        sq.appendChild(el);
+      }
+      sq.addEventListener('click', onSquareClick);
+      boardEl.appendChild(sq);
+    }
+  }
+  updateUIHighlights();
+}
+
+// ===== Movement / Capture rules per official patent =====
+function pieceDirsForMove(type){
+  if(type==='D') return ORTH;      // 1 step only (handled outside)
+  if(type==='S') return ORTH;      // slide ortho
+  if(type==='T') return DIAG;      // slide diag
+  if(type==='W') return ORTH.concat(DIAG); // slide any
+  if(type==='B') return ORTH.concat(DIAG); // up to 3 any
+  return [];
+}
+// For capturing, D and B cannot capture
+function pieceDirsForCapture(type){
+  if(type==='S') return ORTH;
+  if(type==='T') return DIAG;
+  if(type==='W') return ORTH.concat(DIAG);
+  return []; // D and B => no capture
+}
+
+function getMovesFor(r,c,b=board){
+  const piece = b[r][c];
+  if(!piece) return [];
+  const type = piece.type;
+  const moves = [];
+
+  // 1) Captures (optional in both modes, but generation lists them)
+  const capDirs = pieceDirsForCapture(type);
+  if(capDirs.length){
+    const sequences = findCaptureSequences(r,c,b, mode==='advanced' ? 1 : Infinity);
+    sequences.forEach(seq=>{
+      moves.push({dest: seq.dest, capture:true, path: seq.path, captured: seq.captured});
+    });
+  }
+
+  // 2) Non-captures
+  if(type==='D'){
+    // 1 step orth only, no capture
+    for(const [dr,dc] of ORTH){
+      const nr=r+dr, nc=c+dc;
+      if(inBounds(nr,nc) && !b[nr][nc]) moves.push({dest:{r:nr,c:nc}, capture:false});
+    }
+  } else if(type==='B'){
+    // up to 3 in any direction, cannot capture
+    for(const [dr,dc] of pieceDirsForMove(type)){
+      for(let k=1;k<=3;k++){
+        const nr=r+dr*k, nc=c+dc*k;
+        if(!inBounds(nr,nc)) break;
+        if(b[nr][nc]) break; // blocked by any piece
+        moves.push({dest:{r:nr,c:nc}, capture:false});
+      }
+    }
+  } else {
+    // S/T/W sliding movement (until blocked)
+    const slideDirs = pieceDirsForMove(type);
+    for(const [dr,dc] of slideDirs){
+      let nr=r+dr, nc=c+dc;
+      while(inBounds(nr,nc)){
+        if(b[nr][nc]) break; // blocked
+        moves.push({dest:{r:nr,c:nc}, capture:false});
+        nr+=dr; nc+=dc;
+      }
+    }
+  }
+
+  return moves;
+}
+
+// Capture finder: jump over one adjacent enemy into empty beyond.
+// Multiple jumps allowed in basic; only one jump allowed in advanced.
+function findCaptureSequences(r,c,b=board,maxJumps=Infinity){
+  const piece = b[r][c];
+  if(!piece) return [];
+  const dirs = pieceDirsForCapture(piece.type);
+  if(dirs.length===0) return []; // piece cannot capture
+
+  const sequences = [];
+  const startType = piece.type;
+  const startPlayer = piece.player;
+
+  function dfs(cr,cc,curB,path,captured,jumps){
+    let found=false;
+    if(jumps>=maxJumps){
+      // reached jump limit; stop here as a complete sequence
+      if(path.length>0) sequences.push({dest:path[path.length-1], path:[...path], captured:[...captured]});
+      return;
+    }
+    for(const [dr,dc] of dirs){
+      const mr=cr+dr, mc=cc+dc;      // mid (enemy) square
+      const lr=cr+2*dr, lc=cc+2*dc;  // landing square
+      if(!inBounds(mr,mc)||!inBounds(lr,lc)) continue;
+      const mid = curB[mr][mc];
+      if(!mid) continue;
+      if(mid.player===startPlayer) continue;
+      // Blockers cannot be captured; skip over B
+      if(mid.type==='B') continue;
+      // landing must be empty
+      if(curB[lr][lc]) continue;
+
+      // Apply jump
+      const nb = cloneBoard(curB);
+      nb[mr][mc] = null; // captured piece removed
+      nb[cr][cc] = null;
+      nb[lr][lc] = makePiece(startType, startPlayer, startType==='B');
+
+      const npath = path.concat([{r:lr,c:lc}]);
+      const ncap = captured.concat([{r:mr,c:mc}]);
+      found=true;
+      dfs(lr,lc,nb,npath,ncap,jumps+1);
+    }
+    if(!found && path.length>0){
+      sequences.push({dest:path[path.length-1], path:[...path], captured:[...captured]});
+    }
+  }
+
+  dfs(r,c,cloneBoard(b),[],[],0);
+  return sequences;
+}
+
+// ===== Apply move & game flow =====
+function doMove(from, move, b=board){
+  const piece = b[from.r][from.c];
+  if(!piece) return;
+  if(move.capture){
+    // Remove captured pieces
+    for(const pc of move.captured){
+      b[pc.r][pc.c] = null;
+    }
+  }
+  b[move.dest.r][move.dest.c] = piece;
+  b[from.r][from.c] = null;
+}
+
+function countAttackers(b, player){
+  let count=0;
+  for(let r=0;r<8;r++) for(let c=0;c<8;c++){
+    const p=b[r][c];
+    if(p && p.player===player && (p.type==='S'||p.type==='T'||p.type==='W')) count++;
+  }
+  return count;
+}
+
+function checkWin(){
+  const p1Atk = countAttackers(board,1);
+  const p2Atk = countAttackers(board,2);
+  if(p1Atk===0){ setMessage('Red (Player 2) wins — all Blue attackers captured.'); return 2; }
+  if(p2Atk===0){ setMessage('Blue (Player 1) wins — all Red attackers captured.'); return 1; }
+  return 0;
+}
+
+function endTurn(){
+  const winner = checkWin();
+  if(winner) { return; }
+  currentPlayer = currentPlayer===1?2:1;
+  turnText.textContent = 'Player ' + currentPlayer;
+  if(currentPlayer===2 && aiSelect.value!=='2p'){
+    setMessage('Computer thinking...');
+    setTimeout(aiMove, 200);
+  } else {
+    setMessage('Your turn.');
+  }
+}
+
+function onSquareClick(e){
+  // In 2P mode, current player can be either 1 or 2; otherwise only player 1 clicks.
+  const r = +e.currentTarget.dataset.r, c = +e.currentTarget.dataset.c;
+  const piece = board[r][c];
+
+  const allowedPlayer = (aiSelect.value==='2p') ? currentPlayer : 1;
+  if(!(allowedPlayer===currentPlayer)) return;
+
+  if(selected){
+    const ms = getMovesFor(selected.r, selected.c);
+    const match = ms.find(m=>m.dest.r===r && m.dest.c===c);
+    if(match){
+      doMove(selected, match, board);
+      selected = null; selectedText.textContent='—';
+      renderBoard();
+      endTurn();
+      return;
+    }
+    // Reselect own piece
+    if(piece && piece.player===allowedPlayer){
+      selected = {r,c}; selectedText.textContent = coordToStr(selected);
+      renderBoard(); return;
+    }
+    // Deselect
+    selected = null; selectedText.textContent='—'; renderBoard(); return;
+  } else {
+    if(piece && piece.player===allowedPlayer){
+      selected = {r,c}; selectedText.textContent=coordToStr(selected);
+      renderBoard(); return;
+    }
+  }
+}
+
+function updateUIHighlights(){
+  const squares = boardEl.querySelectorAll('.square');
+  squares.forEach(s=>s.classList.remove('selected','hint','capture'));
+  if(selected){
+    const idx = selected.r*8 + selected.c;
+    squares[idx]?.classList.add('selected');
+    const ms = getMovesFor(selected.r, selected.c);
+    for(const m of ms){
+      const didx = m.dest.r*8 + m.dest.c;
+      squares[didx]?.classList.add(m.capture?'capture':'hint');
+    }
+  }
+}
+
+// ===== AI (P2) =====
+function allMovesForPlayer(b, player){
+  const list=[];
+  for(let r=0;r<8;r++) for(let c=0;c<8;c++){
+    const p=b[r][c]; if(!p || p.player!==player) continue;
+    const moves = getMovesFor(r,c,b);
+    for(const mv of moves) list.push({from:{r,c}, move:mv});
+  }
+  return list;
+}
+function evaluate(b){
+  // Emphasize attackers; D/B matter less
+  const val = {W:9, S:5, T:4, D:1, B:0.5};
+  let sco=0;
+  for(let r=0;r<8;r++) for(let c=0;c<8;c++){
+    const p=b[r][c]; if(!p) continue;
+    const v = val[p.type]||0;
+    sco += (p.player===2? v : -v);
+  }
+  // small mobility
+  let m2=0,m1=0;
+  for(let r=0;r<8;r++) for(let c=0;c<8;c++){
+    const p=b[r][c]; if(!p) continue;
+    const m = getMovesFor(r,c,b).length;
+    if(p.player===2) m2+=m; else m1+=m;
+  }
+  sco += 0.05*(m2-m1);
+  // attacker-elimination win bonus
+  if(countAttackers(b,1)===0) sco += 1000;
+  if(countAttackers(b,2)===0) sco -= 1000;
+  return sco;
+}
+function applyMoveOn(b, from, move){
+  const nb = cloneBoard(b);
+  const piece = nb[from.r][from.c];
+  if(move.capture){
+    for(const pc of move.captured) nb[pc.r][pc.c] = null;
+  }
+  nb[move.dest.r][move.dest.c] = piece;
+  nb[from.r][from.c] = null;
+  return nb;
+}
+function minimax(b, depth, alpha, beta, maximizing){
+  if(depth===0) return {score:evaluate(b)};
+  const player = maximizing ? 2 : 1;
+  const moves = allMovesForPlayer(b, player);
+  if(moves.length===0){
+    const noAtk = countAttackers(b, maximizing?1:2)===0;
+    return {score: noAtk ? (maximizing?+1000:-1000) : (maximizing?-100:+100)};
+  }
+  // order: captures first
+  moves.sort((a,bm)=> (bm.move.capture?1:0)-(a.move.capture?1:0));
+  if(maximizing){
+    let best=-Infinity, bestMove=null;
+    for(const m of moves){
+      const nb = applyMoveOn(b,m.from,m.move);
+      const val = minimax(nb, depth-1, alpha, beta, false).score;
+      if(val>best){best=val;bestMove=m;}
+      alpha = Math.max(alpha,val);
+      if(alpha>=beta) break;
+    }
+    return {score:best, move:bestMove};
+  } else {
+    let best=+Infinity, bestMove=null;
+    for(const m of moves){
+      const nb = applyMoveOn(b,m.from,m.move);
+      const val = minimax(nb, depth-1, alpha, beta, true).score;
+      if(val<best){best=val;bestMove=m;}
+      beta = Math.min(beta,val);
+      if(alpha>=beta) break;
+    }
+    return {score:best, move:bestMove};
+  }
+}
+function aiMove(){
+  const all = allMovesForPlayer(board,2);
+  if(all.length===0){ setMessage('Computer has no moves — you win!'); return; }
+  const caps = all.filter(x=>x.move.capture);
+  const level = aiSelect.value;
+  let choice=null;
+  if(level==='easy'){
+    const pool = caps.length? caps : all;
+    choice = pool[Math.floor(Math.random()*pool.length)];
+  } else {
+    const depth = (level==='hard')?3:2;
+    const result = minimax(board, depth, -Infinity, +Infinity, true);
+    choice = result.move || (caps.length? caps[Math.floor(Math.random()*caps.length)] : all[Math.floor(Math.random()*all.length)]);
+  }
+  if(choice){
+    doMove(choice.from, choice.move, board);
+    renderBoard();
+    setMessage('Computer moved ('+level+').');
+    endTurn();
+  }
+}
+
+// ===== Controls =====
+document.getElementById('restart').addEventListener('click', ()=>{
+  selected=null; selectedText.textContent='—';
+  currentPlayer=1; turnText.textContent='Player 1';
+  mode = modeSelect.value;
+  setupBoard(); renderBoard();
+  setMessage('Restarted in '+mode.toUpperCase()+' mode.');
+});
+modeSelect.addEventListener('change', ()=>{
+  mode = modeSelect.value;
+  selected=null; selectedText.textContent='—';
+  currentPlayer=1; turnText.textContent='Player 1';
+  setupBoard(); renderBoard();
+  setMessage('Switched to '+mode.toUpperCase()+' mode.');
+});
+
+// ===== Self-tests (console) =====
+function assert(cond,msg){ if(!cond){ console.error('TEST FAILED:',msg); throw new Error(msg);} else {console.log('TEST OK:',msg);} }
+function tests(){
+  console.group('La Trel self-tests');
+  // Basic mode tests
+  mode='basic'; setupBoard();
+  // Setup counts (no blockers)
+  let p1D=0,p2D=0,p1Atk=0,p2Atk=0, p1B=0,p2B=0;
+  for(let r=0;r<8;r++)for(let c=0;c<8;c++){
+    const p=board[r][c]; if(!p) continue;
+    if(p.player===1){ if(p.type==='D')p1D++; if(p.type==='B')p1B++; if(p.type==='S'||p.type==='T'||p.type==='W')p1Atk++; }
+    if(p.player===2){ if(p.type==='D')p2D++; if(p.type==='B')p2B++; if(p.type==='S'||p.type==='T'||p.type==='W')p2Atk++; }
+  }
+  assert(p1D===8 && p2D===8, 'Basic: 8 Defenders each');
+  assert(p1Atk===8 && p2Atk===8, 'Basic: 8 attackers each (S,T,W mix)');
+  assert(p1B===0 && p2B===0, 'Basic: no blockers present');
+
+  // D cannot capture: enemy adjacent -> no capture
+  const saved = cloneBoard(board);
+  board = Array.from({length:8},()=>Array(8).fill(null));
+  board[4][4] = makePiece('D',1);
+  board[4][5] = makePiece('D',2);
+  const dMoves = getMovesFor(4,4,board);
+  assert(!dMoves.some(m=>m.capture), 'D has no capture moves');
+  board = saved;
+
+  // S orth jump, T diag jump, W any-direction jump
+  // Simple orth capture for S
+  board = Array.from({length:8},()=>Array(8).fill(null));
+  board[4][2] = makePiece('S',1);
+  board[4][3] = makePiece('D',2);
+  let sCaps = getMovesFor(4,2,board).filter(m=>m.capture);
+  assert(sCaps.length===1 && sCaps[0].dest.r===4 && sCaps[0].dest.c===4,'S orth jump works');
+  // Diagonal capture for T
+  board = Array.from({length:8},()=>Array(8).fill(null));
+  board[5][5] = makePiece('T',1);
+  board[4][4] = makePiece('D',2);
+  let tCaps = getMovesFor(5,5,board).filter(m=>m.capture);
+  assert(tCaps.length===1 && tCaps[0].dest.r===3 && tCaps[0].dest.c===3,'T diagonal jump works');
+  // Any-direction capture for W
+  board = Array.from({length:8},()=>Array(8).fill(null));
+  board[2][2] = makePiece('W',1);
+  board[3][2] = makePiece('D',2);
+  let wCaps = getMovesFor(2,2,board).filter(m=>m.capture);
+  assert(wCaps.length===1 && wCaps[0].dest.r===4 && wCaps[0].dest.c===2,'W vertical jump works');
+
+  // Advanced mode tests
+  mode='advanced'; setupBoard();
+  // Blockers in place
+  assert(board[6][3] && board[6][3].type==='B' && board[6][3].player===1,'Advanced: Blue blocker at d2');
+  assert(board[1][4] && board[1][4].type==='B' && board[1][4].player===2,'Advanced: Red blocker at e7');
+  // Blocker cannot be captured
+  const save2 = cloneBoard(board);
+  board = Array.from({length:8},()=>Array(8).fill(null));
+  board[4][4] = makePiece('W',1);
+  board[5][4] = makePiece('B',2,true);
+  let capsOverB = getMovesFor(4,4,board).filter(m=>m.capture);
+  assert(capsOverB.length===0,'Cannot capture a Blocker');
+  board = save2;
+
+  // Advanced: only single capture allowed
+  // Set a chainable position; ensure only one-jump generated
+  board = Array.from({length:8},()=>Array(8).fill(null));
+  board[4][2] = makePiece('S',1);
+  board[4][3] = makePiece('D',2);
+  board[4][5] = makePiece('D',2);
+  mode='advanced';
+  let advCaps = getMovesFor(4,2,board).filter(m=>m.capture);
+  assert(advCaps.length===1 && advCaps[0].dest.r===4 && advCaps[0].dest.c===4,'Advanced: single capture limit');
+  // Switch back to basic and ensure chain permitted (at least the first jump is there; engine may return sequences one by one)
+  mode='basic';
+  let basicCaps = getMovesFor(4,2,board).filter(m=>m.capture);
+  assert(basicCaps.some(m=>m.dest.c===4), 'Basic: capture at least first jump available (chain permitted)');
+  console.groupEnd();
+}
+try { tests(); } catch(e){ console.error('Self-tests aborted:', e); }
+
+// ===== Init =====
+mode = modeSelect.value;
+setupBoard(); renderBoard(); setMessage('Ready. You are Player 1.');
+</script>
+</body>
+</html>
